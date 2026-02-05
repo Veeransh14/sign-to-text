@@ -23,7 +23,7 @@ hd2 = HandDetector(maxHands=1)
 
 offset = 29
 
-os.environ["THEANO_FLAGS"] = "device=cuda, assert_no_cpu_op=True"
+
 
 
 class Application:
