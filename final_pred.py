@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import time
+import queue
 import threading
 import traceback
 import pyttsx3
@@ -88,11 +89,10 @@ class Application:
             self.model = load_model('cnn8grps_rad1_model.h5')
         print("✓ Models loaded successfully")
         
-        # Initialize text-to-speech engine
-        self.speak_engine = pyttsx3.init()
-        self.speak_engine.setProperty("rate", 100)
-        voices = self.speak_engine.getProperty("voices")
-        self.speak_engine.setProperty("voice", voices[0].id)
+        # Initialize text-to-speech engine (single worker thread + queue)
+        self._tts_queue = queue.Queue()
+        self._tts_thread = threading.Thread(target=self._tts_worker, daemon=True)
+        self._tts_thread.start()
 
         # Sequence buffer for temporal models (3D CNN, LSTM, Transformer)
         self.frame_buffer = []
@@ -100,9 +100,9 @@ class Application:
 
         # ── Prediction smoothing & filtering ─────────────────────────
         self.smoothed_prob = None         # EMA-smoothed probability vector
-        self.EMA_ALPHA = 0.3             # smoothing factor (lower = more stable, absorbs noise)
-        self.CONFIDENCE_THRESHOLD = 0.50  # minimum confidence to accept a letter
-        self.VOTE_WINDOW = 20            # sliding window for majority voting (more frames = stabler)
+        self.EMA_ALPHA = 0.45            # smoothing factor (higher = more responsive)
+        self.CONFIDENCE_THRESHOLD = 0.20  # 26 classes → random=3.8%, so 20% is 5x random
+        self.VOTE_WINDOW = 20            # sliding window for majority voting
         self.recent_preds = []           # recent predictions for majority vote
 
         # ── Letter stabilization (time-based) ──────────────────────
@@ -403,7 +403,7 @@ class Application:
         self._update_progress(0.0)
         self.status_label.config(text=f"Word '{suggested_word}' selected", fg="#0066cc")
         # Speak the completed word
-        threading.Thread(target=self._tts_say, args=(suggested_word,), daemon=True).start()
+        self._tts_say(suggested_word)
 
     def action1(self):
         self._apply_suggestion(self.word1)
@@ -420,7 +420,7 @@ class Application:
     def speak_fun(self):
         text = self.str.strip()
         if text:
-            threading.Thread(target=self._tts_say, args=(text,), daemon=True).start()
+            self._tts_say(text)
 
     def clear_fun(self):
         self.str = " "
@@ -798,19 +798,39 @@ class Application:
 
     # ── Helper: speak the last completed word ────────────────────
     def speak_last_word(self):
-        """Speak the last word in the sentence (in a background thread)."""
+        """Speak the last word in the sentence."""
         words = self.str.strip().split()
         if words:
-            word = words[-1]
-            threading.Thread(target=self._tts_say, args=(word,), daemon=True).start()
+            self._tts_say(words[-1])
 
     def _tts_say(self, text):
-        """Run TTS in background thread so UI doesn't freeze."""
-        try:
-            self.speak_engine.say(text)
-            self.speak_engine.runAndWait()
-        except Exception as e:
-            print(f"TTS error: {e}")
+        """Queue text to be spoken by the dedicated TTS worker thread."""
+        self._tts_queue.put(text)
+
+    def _tts_worker(self):
+        """Dedicated TTS thread — processes speak requests one at a time."""
+        engine = pyttsx3.init()
+        engine.setProperty("rate", 130)
+        voices = engine.getProperty("voices")
+        engine.setProperty("voice", voices[0].id)
+
+        while True:
+            text = self._tts_queue.get()
+            if text is None:
+                break
+            try:
+                engine.say(text)
+                engine.runAndWait()
+            except Exception as e:
+                print(f"TTS error: {e}")
+                # Recreate engine if it gets into a bad state
+                try:
+                    engine = pyttsx3.init()
+                    engine.setProperty("rate", 130)
+                    voices = engine.getProperty("voices")
+                    engine.setProperty("voice", voices[0].id)
+                except:
+                    pass
 
     def destructor(self):
         print("Closing application...")
