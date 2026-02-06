@@ -1,12 +1,9 @@
-# ============================================================================
-# FILE 1: final_pred.py (COMPLETE FIXED VERSION)
-# ============================================================================
-
 import numpy as np
 import math
 import cv2
 import os
 import sys
+import time
 import traceback
 import pyttsx3
 from keras.models import load_model
@@ -26,30 +23,71 @@ offset = 29
 os.environ["THEANO_FLAGS"] = "device=cuda, assert_no_cpu_op=True"
 
 
+def initialize_camera():
+    """
+    Initialize camera with multiple fallback options
+    """
+    print("Attempting to open camera...")
+    
+    # First, try to release any existing camera instances
+    for i in range(5):
+        try:
+            temp = cv2.VideoCapture(i)
+            temp.release()
+        except:
+            pass
+    
+    # Wait for camera to be available
+    time.sleep(0.5)
+    
+    # Try multiple camera indices with different backends
+    backends = [cv2.CAP_V4L2, cv2.CAP_ANY]
+    
+    # Try external camera first (video32, video33), then internal cameras
+    #for camera_index in [32, 33, 0, 1, 2, 3, 4]:
+    for camera_index in [0-49]:
+        for backend in backends:
+            try:
+                vs = cv2.VideoCapture(camera_index, backend)
+                
+                if vs.isOpened():
+                    # Set camera properties
+                    vs.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    vs.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    vs.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    
+                    # Try to read a test frame
+                    ret, test_frame = vs.read()
+                    if ret and test_frame is not None:
+                        print(f"Successfully opened camera at index {camera_index}")
+                        return vs
+                    
+                    vs.release()
+            except Exception as e:
+                continue
+    
+    return None
+
+
 class Application:
     def __init__(self):
-        # Try to open camera with different indices
-        self.vs = None
-        print("Attempting to open camera...")
-        for camera_index in [0, 1, 2]:
-            test_vs = cv2.VideoCapture(camera_index)
-            if test_vs.isOpened():
-                ret, test_frame = test_vs.read()
-                if ret and test_frame is not None:
-                    self.vs = test_vs
-                    print(f"✓ Successfully opened camera at index {camera_index}")
-                    break
-                test_vs.release()
+        # Initialize camera
+        self.vs = initialize_camera()
         
         if self.vs is None:
-            raise RuntimeError("❌ Could not open any camera. Please check your camera connection.")
+            raise RuntimeError(
+                "Could not open any camera. Please check:\n"
+                "1. Camera is connected properly\n"
+                "2. No other application is using the camera\n"
+                "3. Camera permissions are granted"
+            )
         
         self.current_image = None
         
         # Load the trained model
         print("Loading model...")
         self.model = load_model('cnn8grps_rad1_model.h5')
-        print("✓ Model loaded successfully")
+        print("Model loaded successfully")
         
         # Initialize text-to-speech engine
         self.speak_engine = pyttsx3.init()
@@ -152,9 +190,9 @@ class Application:
         if not os.path.exists("white.jpg"):
             white_img = np.ones((400, 400, 3), dtype=np.uint8) * 255
             cv2.imwrite("white.jpg", white_img)
-            print("✓ Created white.jpg")
+            print("Created white.jpg")
 
-        print("✓ Application initialized successfully")
+        print("Application initialized successfully")
         self.video_loop()
 
     def video_loop(self):
@@ -267,7 +305,7 @@ class Application:
             print(f"Error in video_loop: {e}")
             print(traceback.format_exc())
         finally:
-            self.root.after(30, self.video_loop)  # ~33 FPS
+            self.root.after(30, self.video_loop)
 
     def distance(self, x, y):
         return math.sqrt(((x[0] - y[0]) ** 2) + ((x[1] - y[1]) ** 2))
@@ -320,9 +358,6 @@ class Application:
 
         pl = [ch1, ch2]
 
-        # Apply classification rules (your existing logic)
-        # [All your existing classification rules here - keeping them as is]
-        
         # Group 0: condition for [Aemnst]
         l = [[5, 2], [5, 3], [3, 5], [3, 6], [3, 0], [3, 2], [6, 4], [6, 1], [6, 2], [6, 6], [6, 7], [6, 0], [6, 5],
              [4, 1], [1, 0], [1, 1], [6, 3], [1, 6], [5, 6], [5, 1], [4, 5], [1, 4], [1, 5], [2, 0], [2, 6], [4, 6],
@@ -353,9 +388,6 @@ class Application:
         if pl in l:
             if self.distance(self.pts[8], self.pts[16]) < 52:
                 ch1 = 2
-
-        # [Continue with all your other classification rules...]
-        # [I'm keeping your exact logic - just showing the structure]
 
         # Subgroup classification
         if ch1 == 0:
@@ -508,7 +540,7 @@ class Application:
         if self.vs is not None:
             self.vs.release()
         cv2.destroyAllWindows()
-        print("✓ Application closed successfully")
+        print("Application closed successfully")
 
 
 if __name__ == "__main__":
@@ -519,5 +551,5 @@ if __name__ == "__main__":
         app = Application()
         app.root.mainloop()
     except Exception as e:
-        print(f"❌ Fatal error: {e}")
+        print(f"Fatal error: {e}")
         print(traceback.format_exc())
