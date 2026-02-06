@@ -1,0 +1,49 @@
+{
+  "best_model": "cnn3d_model",
+  "models": [
+    {
+      "model_name": "cnn2d_model",
+      "accuracy": 91.26,
+      "precision": 93.57,
+      "recall": 91.24,
+      "f1_score": 90.77,
+      "loss": 0.2511,
+      "avg_inference_ms": 2.0,
+      "param_count": 114010,
+      "model_size_mb": 1.38
+    },
+    {
+      "model_name": "cnn3d_model",
+      "accuracy": 96.7,
+      "precision": 97.95,
+      "recall": 96.79,
+      "f1_score": 96.94,
+      "loss": 0.2828,
+      "avg_inference_ms": 17.71,
+      "param_count": 300058,
+      "model_size_mb": 3.5
+    },
+    {
+      "model_name": "lstm_model",
+      "accuracy": 13.19,
+      "precision": 2.19,
+      "recall": 12.82,
+      "f1_score": 3.69,
+      "loss": 3.1345,
+      "avg_inference_ms": 27.67,
+      "param_count": 214938,
+      "model_size_mb": 2.53
+    },
+    {
+      "model_name": "transformer_model",
+      "accuracy": 3.3,
+      "precision": 0.13,
+      "recall": 3.85,
+      "f1_score": 0.25,
+      "loss": 3.2534,
+      "avg_inference_ms": 28.62,
+      "param_count": 171802,
+      "model_size_mb": 2.07
+    }
+  ]
+}

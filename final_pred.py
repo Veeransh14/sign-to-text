@@ -1,9 +1,11 @@
+
+
 import numpy as np
 import math
 import cv2
 import os
 import sys
-import time
+import json
 import traceback
 import pyttsx3
 from keras.models import load_model
@@ -13,87 +15,73 @@ import enchant
 import tkinter as tk
 from PIL import Image, ImageTk
 
+# ─── Best-model selection ─────────────────────────────────────────────────────
+# Set USE_BEST_MODEL = True to load the best model from multi-model comparison
+# instead of the legacy 8-group model. Requires running train_models.py first.
+USE_BEST_MODEL = True
+
 # Initialize spell checker and hand detectors
 ddd = enchant.Dict("en-US")
 hd = HandDetector(maxHands=1)
 hd2 = HandDetector(maxHands=1)
 
-offset = 29
+offset = 58
 
 os.environ["THEANO_FLAGS"] = "device=cuda, assert_no_cpu_op=True"
 
 
-def initialize_camera():
-    """
-    Initialize camera with multiple fallback options
-    """
-    print("Attempting to open camera...")
-    
-    # First, try to release any existing camera instances
-    for i in range(5):
-        try:
-            temp = cv2.VideoCapture(i)
-            temp.release()
-        except:
-            pass
-    
-    # Wait for camera to be available
-    time.sleep(0.5)
-    
-    # Try multiple camera indices with different backends
-    backends = [cv2.CAP_V4L2, cv2.CAP_ANY]
-    
-    # Try external camera first (video32, video33), then internal cameras
-    #for camera_index in [32, 33, 0, 1, 2, 3, 4]:
-    for camera_index in [0-49]:
-        for backend in backends:
-            try:
-                vs = cv2.VideoCapture(camera_index, backend)
-                
-                if vs.isOpened():
-                    # Set camera properties
-                    vs.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    vs.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    vs.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                    
-                    # Try to read a test frame
-                    ret, test_frame = vs.read()
-                    if ret and test_frame is not None:
-                        print(f"Successfully opened camera at index {camera_index}")
-                        return vs
-                    
-                    vs.release()
-            except Exception as e:
-                continue
-    
-    return None
-
-
 class Application:
     def __init__(self):
-        # Initialize camera
-        self.vs = initialize_camera()
+        # Try to open camera with different indices
+        self.vs = None
+        print("Attempting to open camera...")
+        for camera_index in [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40]:
+            test_vs = cv2.VideoCapture(camera_index)
+            if test_vs.isOpened():
+                ret, test_frame = test_vs.read()
+                if ret and test_frame is not None:
+                    self.vs = test_vs
+                    print(f"✓ Successfully opened camera at index {camera_index}")
+                    break
+                test_vs.release()
         
         if self.vs is None:
-            raise RuntimeError(
-                "Could not open any camera. Please check:\n"
-                "1. Camera is connected properly\n"
-                "2. No other application is using the camera\n"
-                "3. Camera permissions are granted"
-            )
+            raise RuntimeError("❌ Could not open any camera. Please check your camera connection.")
         
         self.current_image = None
         
         # Load the trained model
         print("Loading model...")
-        self.model = load_model('cnn8grps_rad1_model.h5')
-        print("Model loaded successfully")
+        self.use_26class = False
+        if USE_BEST_MODEL:
+            best_model_path, best_model_name = self._find_best_model()
+            if best_model_path:
+                try:
+                    custom_objects = {}
+                    if 'transformer' in best_model_name:
+                        from train_models import PositionalEncoding
+                        custom_objects['PositionalEncoding'] = PositionalEncoding
+                    self.model = load_model(best_model_path, custom_objects=custom_objects)
+                    self.use_26class = True
+                    print(f"✓ Loaded best model: {best_model_name}")
+                except Exception as e:
+                    print(f"  Warning: Failed to load best model ({e}), falling back to legacy")
+                    self.model = load_model('cnn8grps_rad1_model.h5')
+            else:
+                self.model = load_model('cnn8grps_rad1_model.h5')
+        else:
+            self.model = load_model('cnn8grps_rad1_model.h5')
+        print("✓ Model loaded successfully")
         
         # Initialize text-to-speech engine
         self.speak_engine = pyttsx3.init()
         self.speak_engine.setProperty("rate", 100)
         voices = self.speak_engine.getProperty("voices")
         self.speak_engine.setProperty("voice", voices[0].id)
+
+        # Sequence buffer for temporal models (3D CNN, LSTM, Transformer)
+        self.frame_buffer = []
+        self.seq_len = 10
 
         # Initialize counters and flags
         self.ct = {}
@@ -190,10 +178,27 @@ class Application:
         if not os.path.exists("white.jpg"):
             white_img = np.ones((400, 400, 3), dtype=np.uint8) * 255
             cv2.imwrite("white.jpg", white_img)
-            print("Created white.jpg")
+            print("✓ Created white.jpg")
 
-        print("Application initialized successfully")
+        print("✓ Application initialized successfully")
         self.video_loop()
+
+    def _find_best_model(self):
+        """Find the best model from multi-model comparison results."""
+        results_path = os.path.join(os.path.dirname(__file__), 'models', 'comparison_results.json')
+        if not os.path.exists(results_path):
+            print("  No comparison_results.json found. Run train_models.py first.")
+            return None, None
+        with open(results_path, 'r') as f:
+            results = json.load(f)
+        best_name = results.get('best_model')
+        if not best_name:
+            return None, None
+        model_path = os.path.join(os.path.dirname(__file__), 'models', f'{best_name}.h5')
+        if os.path.exists(model_path):
+            return model_path, best_name
+        print(f"  Best model file not found: {model_path}")
+        return None, None
 
     def video_loop(self):
         try:
@@ -305,7 +310,7 @@ class Application:
             print(f"Error in video_loop: {e}")
             print(traceback.format_exc())
         finally:
-            self.root.after(30, self.video_loop)
+            self.root.after(30, self.video_loop)  # ~33 FPS
 
     def distance(self, x, y):
         return math.sqrt(((x[0] - y[0]) ** 2) + ((x[1] - y[1]) ** 2))
@@ -346,6 +351,51 @@ class Application:
         self.word4 = " "
 
     def predict(self, test_image):
+        # ── 26-class best model path ──────────────────────────────
+        if self.use_26class:
+            input_shape = self.model.input_shape
+            is_sequence = len(input_shape) == 5  # (batch, seq, h, w, c)
+            img_h, img_w = (input_shape[2], input_shape[3]) if is_sequence else (input_shape[1], input_shape[2])
+            resized = cv2.resize(test_image, (img_w, img_h))
+            resized = resized.astype(np.float32) / 255.0
+
+            if is_sequence:
+                self.frame_buffer.append(resized)
+                if len(self.frame_buffer) > self.seq_len:
+                    self.frame_buffer = self.frame_buffer[-self.seq_len:]
+                if len(self.frame_buffer) < self.seq_len:
+                    self.current_symbol = "..."
+                    return
+                seq = np.array(self.frame_buffer).reshape(1, self.seq_len, img_h, img_w, 3)
+                prob = self.model.predict(seq, verbose=0)[0]
+            else:
+                inp = resized.reshape(1, img_h, img_w, 3)
+                prob = self.model.predict(inp, verbose=0)[0]
+
+            idx = np.argmax(prob)
+            ch1 = chr(ord('A') + idx)
+            self.prev_char = ch1
+            self.current_symbol = ch1
+            self.count += 1
+            self.ten_prev_char[self.count % 10] = ch1
+            if len(self.str.strip()) != 0:
+                st = self.str.rfind(" ")
+                word = self.str[st + 1:]
+                self.word = word
+                if len(word.strip()) != 0:
+                    try:
+                        ddd.check(word)
+                        suggestions = ddd.suggest(word)
+                        lenn = len(suggestions)
+                        self.word1 = suggestions[0] if lenn >= 1 else " "
+                        self.word2 = suggestions[1] if lenn >= 2 else " "
+                        self.word3 = suggestions[2] if lenn >= 3 else " "
+                        self.word4 = suggestions[3] if lenn >= 4 else " "
+                    except:
+                        self.word1 = self.word2 = self.word3 = self.word4 = " "
+            return
+
+        # ── Legacy 8-group model path ─────────────────────────────
         white = test_image
         white = white.reshape(1, 400, 400, 3)
         prob = np.array(self.model.predict(white, verbose=0)[0], dtype='float32')
@@ -358,6 +408,9 @@ class Application:
 
         pl = [ch1, ch2]
 
+        # Apply classification rules (your existing logic)
+        # [All your existing classification rules here - keeping them as is]
+        
         # Group 0: condition for [Aemnst]
         l = [[5, 2], [5, 3], [3, 5], [3, 6], [3, 0], [3, 2], [6, 4], [6, 1], [6, 2], [6, 6], [6, 7], [6, 0], [6, 5],
              [4, 1], [1, 0], [1, 1], [6, 3], [1, 6], [5, 6], [5, 1], [4, 5], [1, 4], [1, 5], [2, 0], [2, 6], [4, 6],
@@ -388,6 +441,9 @@ class Application:
         if pl in l:
             if self.distance(self.pts[8], self.pts[16]) < 52:
                 ch1 = 2
+
+        # [Continue with all your other classification rules...]
+        # [I'm keeping your exact logic - just showing the structure]
 
         # Subgroup classification
         if ch1 == 0:
@@ -540,7 +596,7 @@ class Application:
         if self.vs is not None:
             self.vs.release()
         cv2.destroyAllWindows()
-        print("Application closed successfully")
+        print("✓ Application closed successfully")
 
 
 if __name__ == "__main__":
@@ -551,5 +607,14 @@ if __name__ == "__main__":
         app = Application()
         app.root.mainloop()
     except Exception as e:
-        print(f"Fatal error: {e}")
+        print(f"❌ Fatal error: {e}")
         print(traceback.format_exc())
+        
+        
+        
+        
+# robust 
+# letter -> word -> sentence 
+# character intact 
+# model change - cnn 
+
