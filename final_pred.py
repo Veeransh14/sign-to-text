@@ -28,7 +28,7 @@ ddd = enchant.Dict("en-US")
 hd = HandDetector(maxHands=1)
 hd2 = HandDetector(maxHands=1)
 
-offset = 58
+offset = 15  # must match data_collection_final.py (training data used 15)
 
 os.environ["THEANO_FLAGS"] = "device=cuda, assert_no_cpu_op=True"
 
@@ -53,28 +53,40 @@ class Application:
         
         self.current_image = None
         
-        # Load the trained model
-        print("Loading model...")
+        # Load models
+        print("Loading models...")
         self.use_26class = False
+        self.model_2d = None   # fast 2D CNN (primary, ~2ms per frame)
+        self.model_3d = None   # 3D CNN (secondary ensemble, ~18ms per sequence)
+        self.model = None      # legacy fallback
+
         if USE_BEST_MODEL:
-            best_model_path, best_model_name = self._find_best_model()
-            if best_model_path:
+            model_dir = os.path.join(os.path.dirname(__file__), 'models')
+            # Load 2D CNN (primary — fast per-frame predictions)
+            path_2d = os.path.join(model_dir, 'cnn2d_model.h5')
+            if os.path.exists(path_2d):
                 try:
-                    custom_objects = {}
-                    if 'transformer' in best_model_name:
-                        from train_models import PositionalEncoding
-                        custom_objects['PositionalEncoding'] = PositionalEncoding
-                    self.model = load_model(best_model_path, custom_objects=custom_objects)
+                    self.model_2d = load_model(path_2d)
                     self.use_26class = True
-                    print(f"✓ Loaded best model: {best_model_name}")
+                    print(f"  ✓ Loaded 2D CNN (primary): {path_2d}")
                 except Exception as e:
-                    print(f"  Warning: Failed to load best model ({e}), falling back to legacy")
-                    self.model = load_model('cnn8grps_rad1_model.h5')
-            else:
+                    print(f"  Warning: Failed to load 2D CNN: {e}")
+
+            # Load 3D CNN (ensemble confirmation)
+            path_3d = os.path.join(model_dir, 'cnn3d_model.h5')
+            if os.path.exists(path_3d):
+                try:
+                    self.model_3d = load_model(path_3d)
+                    print(f"  ✓ Loaded 3D CNN (ensemble): {path_3d}")
+                except Exception as e:
+                    print(f"  Warning: Failed to load 3D CNN: {e}")
+
+            if not self.use_26class:
+                print("  No 26-class models found, falling back to legacy")
                 self.model = load_model('cnn8grps_rad1_model.h5')
         else:
             self.model = load_model('cnn8grps_rad1_model.h5')
-        print("✓ Model loaded successfully")
+        print("✓ Models loaded successfully")
         
         # Initialize text-to-speech engine
         self.speak_engine = pyttsx3.init()
@@ -88,10 +100,10 @@ class Application:
 
         # ── Prediction smoothing & filtering ─────────────────────────
         self.smoothed_prob = None         # EMA-smoothed probability vector
-        self.EMA_ALPHA = 0.35            # smoothing factor (lower = more stable)
-        self.CONFIDENCE_THRESHOLD = 0.55  # minimum confidence to accept a letter
-        self.VOTE_WINDOW = 15            # sliding window size for majority voting
-        self.recent_preds = []           # recent raw predictions for majority vote
+        self.EMA_ALPHA = 0.3             # smoothing factor (lower = more stable, absorbs noise)
+        self.CONFIDENCE_THRESHOLD = 0.50  # minimum confidence to accept a letter
+        self.VOTE_WINDOW = 20            # sliding window for majority voting (more frames = stabler)
+        self.recent_preds = []           # recent predictions for majority vote
 
         # ── Letter stabilization (time-based) ──────────────────────
         self.stable_char = None          # character currently being held
@@ -425,28 +437,47 @@ class Application:
         self.status_label.config(text="Cleared — show a sign", fg="#666666")
 
     def predict(self, test_image):
-        # ── 26-class best model path ──────────────────────────────
+        # ── 26-class ensemble path ───────────────────────────────
         if self.use_26class:
-            input_shape = self.model.input_shape
-            is_sequence = len(input_shape) == 5  # (batch, seq, h, w, c)
-            img_h, img_w = (input_shape[2], input_shape[3]) if is_sequence else (input_shape[1], input_shape[2])
-            resized = cv2.resize(test_image, (img_w, img_h))
+            # Prepare input at 64x64 (shared by both models)
+            img_size = 64
+            resized = cv2.resize(test_image, (img_size, img_size))
             resized = resized.astype(np.float32) / 255.0
 
-            if is_sequence:
+            # ── 2D CNN: fast per-frame prediction (primary) ──────
+            prob = None
+            if self.model_2d is not None:
+                inp = resized.reshape(1, img_size, img_size, 3)
+                prob = self.model_2d.predict(inp, verbose=0)[0]
+
+            # ── 3D CNN: temporal ensemble (secondary) ────────────
+            if self.model_3d is not None:
                 self.frame_buffer.append(resized)
                 if len(self.frame_buffer) > self.seq_len:
                     self.frame_buffer = self.frame_buffer[-self.seq_len:]
-                if len(self.frame_buffer) < self.seq_len:
-                    self.current_symbol = "..."
-                    self._update_progress(0.0)
-                    self.status_label.config(text="Buffering frames...", fg="#999900")
-                    return
-                seq = np.array(self.frame_buffer).reshape(1, self.seq_len, img_h, img_w, 3)
-                prob = self.model.predict(seq, verbose=0)[0]
-            else:
-                inp = resized.reshape(1, img_h, img_w, 3)
-                prob = self.model.predict(inp, verbose=0)[0]
+
+                if len(self.frame_buffer) >= self.seq_len:
+                    seq = np.array(self.frame_buffer).reshape(
+                        1, self.seq_len, img_size, img_size, 3)
+                    prob_3d = self.model_3d.predict(seq, verbose=0)[0]
+
+                    if prob is not None:
+                        # Only blend 3D if it agrees with 2D on the top letter,
+                        # otherwise 3D buffer likely has transition noise
+                        top_2d = np.argmax(prob)
+                        top_3d = np.argmax(prob_3d)
+                        if top_2d == top_3d:
+                            # Both agree — blend for extra confidence
+                            prob = 0.5 * prob + 0.5 * prob_3d
+                        else:
+                            # Disagree — trust 2D (no buffer pollution)
+                            prob = 0.7 * prob + 0.3 * prob_3d
+                    else:
+                        prob = prob_3d
+
+            if prob is None:
+                self.current_symbol = "..."
+                return
 
             # ── Step 1: EMA probability smoothing ─────────────────
             if self.smoothed_prob is None:
@@ -474,7 +505,6 @@ class Application:
             if len(self.recent_preds) > self.VOTE_WINDOW:
                 self.recent_preds = self.recent_preds[-self.VOTE_WINDOW:]
 
-            # Find the most common prediction in the window
             vote_counts = Counter(self.recent_preds)
             voted_char, voted_count = vote_counts.most_common(1)[0]
             vote_ratio = voted_count / len(self.recent_preds)
@@ -483,7 +513,7 @@ class Application:
             if vote_ratio >= 0.6:
                 stable_letter = voted_char
             else:
-                stable_letter = ch1  # fallback to smoothed prediction
+                stable_letter = ch1
 
             self.current_symbol = stable_letter
             self.count += 1
@@ -493,19 +523,17 @@ class Application:
             now = time.time()
 
             if stable_letter == self.stable_char:
-                # Same letter continues — update progress
                 elapsed = now - self.stable_start_time
                 progress = min(elapsed / self.STABLE_SECONDS, 1.0)
                 self._update_progress(progress)
+                remaining = max(0, self.STABLE_SECONDS - elapsed)
                 self.status_label.config(
-                    text=f"'{stable_letter}' ({confidence:.0%}) — {self.STABLE_SECONDS - elapsed:.1f}s left",
+                    text=f"'{stable_letter}' ({confidence:.0%}) — {remaining:.1f}s left",
                     fg="#cc6600")
 
                 if elapsed >= self.STABLE_SECONDS and stable_letter != self.last_finalized_char:
-                    # FINALIZE this letter
                     self._finalize_letter(stable_letter)
             else:
-                # Different letter detected — reset timer
                 self.stable_char = stable_letter
                 self.stable_start_time = now
                 self.last_finalized_char = None
@@ -514,7 +542,6 @@ class Application:
                     text=f"Detecting '{stable_letter}' ({confidence:.0%}) — hold steady...",
                     fg="#cc6600")
 
-            # ── Update word suggestions ───────────────────────────
             self._update_suggestions()
             return
 
@@ -719,6 +746,12 @@ class Application:
         self.str = self.str + ch
         self.char_finalized_flag = True
         self.finalized_flash_time = time.time()
+
+        # Clear 3D CNN buffer so next letter starts without old-gesture frames
+        self.frame_buffer.clear()
+        # Clear smoothing state so next letter isn't biased by old probabilities
+        self.smoothed_prob = None
+        self.recent_preds.clear()
 
         # Reset progress bar to full green briefly
         self._update_progress(1.0)
