@@ -15,6 +15,8 @@ from string import ascii_uppercase
 import enchant
 import tkinter as tk
 from PIL import Image, ImageTk
+from collections import deque
+import time
 
 # Initialize spell checker and hand detectors
 ddd = enchant.Dict("en-US")
@@ -56,6 +58,16 @@ class Application:
         self.speak_engine.setProperty("rate", 100)
         voices = self.speak_engine.getProperty("voices")
         self.speak_engine.setProperty("voice", voices[0].id)
+
+        # Robustness & Smoothing Variables
+        self.history = deque(maxlen=15)  # Buffer for last 15 frames
+        self.stable_char = " "
+        self.dwell_start_time = 0
+        self.DWELL_THRESHOLD = 1.0  # Seconds to hold a sign to type it
+        self.last_char_added = ""
+        self.current_confidence = 0.0
+        self.is_locking = False
+        self.progress_percent = 0
 
         # Initialize counters and flags
         self.ct = {}
@@ -108,6 +120,15 @@ class Application:
         self.T3 = tk.Label(self.root)
         self.T3.place(x=10, y=632)
         self.T3.config(text="Sentence :", font=("Courier", 30, "bold"))
+
+        # Confidence & Status Display
+        self.conf_label = tk.Label(self.root)
+        self.conf_label.place(x=700, y=550)
+        self.conf_label.config(text="Confidence: 0%", font=("Courier", 15, "bold"), fg="blue")
+
+        self.progress_label = tk.Label(self.root)
+        self.progress_label.place(x=700, y=580)
+        self.progress_label.config(text="", font=("Courier", 15, "bold"), fg="green")
 
         # Suggestions label
         self.T4 = tk.Label(self.root)
@@ -254,7 +275,21 @@ class Application:
                         self.panel2.imgtk = imgtk
                         self.panel2.config(image=imgtk)
 
+
+
+                        # Update GUI with Smoothed Prediction and Confidence
                         self.panel3.config(text=self.current_symbol, font=("Courier", 30))
+                        
+                        # Update Confidence Label
+                        conf_text = f"Confidence: {int(self.current_confidence * 100)}%"
+                        self.conf_label.config(text=conf_text)
+                        
+                        # Update Lock-in Progress
+                        if self.is_locking:
+                            prog_text = f"Locking in: {'|' * int(self.progress_percent * 10)}"
+                            self.progress_label.config(text=prog_text, fg="green")
+                        else:
+                            self.progress_label.config(text="", fg="black")
 
                         self.b1.config(text=self.word1, font=("Courier", 20), wraplength=825, command=self.action1)
                         self.b2.config(text=self.word2, font=("Courier", 20), wraplength=825, command=self.action2)
@@ -311,6 +346,10 @@ class Application:
         white = test_image
         white = white.reshape(1, 400, 400, 3)
         prob = np.array(self.model.predict(white, verbose=0)[0], dtype='float32')
+        
+        # Store raw model confidence
+        self.current_confidence = np.max(prob)
+        
         ch1 = np.argmax(prob, axis=0)
         prob[ch1] = 0
         ch2 = np.argmax(prob, axis=0)
@@ -471,12 +510,67 @@ class Application:
                 if self.ten_prev_char[(self.count - 0) % 10] != "Backspace":
                     self.str = self.str + self.ten_prev_char[(self.count - 0) % 10]
 
-        # Handle space
+        # Handle space (Heuristics)
         if ch1 == "  " and self.prev_char != "  ":
             self.str = self.str + "  "
 
+        # =================================================================
+        # ROBUSTNESS LOGIC: Smoothing & Dwell-Time
+        # =================================================================
+        
+        # 1. Add current frame's character to history
+        self.history.append(ch1)
+        
+        # 2. Voting: Find most common character in history
+        try:
+            most_common_char = max(set(self.history), key=self.history.count)
+            occurrence_count = self.history.count(most_common_char)
+            confidence_in_history = occurrence_count / len(self.history)
+        except ValueError:
+            most_common_char = ch1
+            confidence_in_history = 0
+
+        # Update the displayed symbol to the SMOOTHED one, not the raw one
+        self.current_symbol = most_common_char
+
+        # 3. Dwell-Time Auto-Append Logic
+        # Only process if confident (>60% of frames agree) and it's a valid char
+        valid_char = len(str(most_common_char).strip()) > 0 and str(most_common_char) not in ["  ", "next", "Backspace"]
+        
+        if valid_char and confidence_in_history > 0.6:
+            if most_common_char == self.stable_char:
+                # Holding the same character
+                elapsed = time.time() - self.dwell_start_time
+                self.progress_percent = min(elapsed / self.DWELL_THRESHOLD, 1.0)
+                self.is_locking = True
+                
+                if elapsed >= self.DWELL_THRESHOLD:
+                    # Time threshold met! Append character.
+                    if most_common_char != self.last_char_added: # Prevent rapid repeat
+                        self.str += most_common_char
+                        self.last_char_added = most_common_char
+                        self.last_char_added_time = time.time()
+                        # Reset to avoid double typing immediately
+                        self.dwell_start_time = time.time() 
+                        self.is_locking = False
+                        self.progress_percent = 0
+                        # Auto-suggestion update trigger
+                        self.ten_prev_char[self.count % 10] = most_common_char # Keep history logic happy
+            else:
+                # New character detected (stable change)
+                self.stable_char = most_common_char
+                self.dwell_start_time = time.time()
+                self.last_char_added = "" # Reset repeat guard for new char
+                self.is_locking = True
+                self.progress_percent = 0
+        else:
+            # Unstable or empty - reset dwell timer
+            self.stable_char = None
+            self.is_locking = False
+            self.progress_percent = 0
+
         self.prev_char = ch1
-        self.current_symbol = ch1
+        # self.current_symbol = ch1 # Handled above by smoothing
         self.count += 1
         self.ten_prev_char[self.count % 10] = ch1
 
