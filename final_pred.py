@@ -408,7 +408,7 @@ class Application:
     def speak_fun(self):
         text = self.str.strip()
         if text:
-            self._tts_say(text)
+            self._tts_say(text, drain=True)
 
     def clear_fun(self):
         self.str = " "
@@ -768,36 +768,38 @@ class Application:
         """Speak the last word in the sentence."""
         words = self.str.strip().split()
         if words:
-            self._tts_say(words[-1])
+            self._tts_say(words[-1], drain=True)
 
-    def _tts_say(self, text):
-        """Queue text to be spoken by the dedicated TTS worker thread."""
+    def _tts_say(self, text, drain=False):
+        """Queue text to be spoken by the dedicated TTS worker thread.
+
+        drain=True discards any pending items so only this text is spoken next.
+        """
+        if drain:
+            while not self._tts_queue.empty():
+                try:
+                    self._tts_queue.get_nowait()
+                except queue.Empty:
+                    break
         self._tts_queue.put(text)
 
     def _tts_worker(self):
-        """Dedicated TTS thread — processes speak requests one at a time."""
-        engine = pyttsx3.init()
-        engine.setProperty("rate", 130)
-        voices = engine.getProperty("voices")
-        engine.setProperty("voice", voices[0].id)
-
+        """Dedicated TTS thread — re-initializes engine per utterance for reliability."""
         while True:
             text = self._tts_queue.get()
             if text is None:
                 break
             try:
+                engine = pyttsx3.init()
+                engine.setProperty("rate", 130)
+                voices = engine.getProperty("voices")
+                if voices:
+                    engine.setProperty("voice", voices[0].id)
                 engine.say(text)
                 engine.runAndWait()
+                engine.stop()
             except Exception as e:
                 print(f"TTS error: {e}")
-                # Recreate engine if it gets into a bad state
-                try:
-                    engine = pyttsx3.init()
-                    engine.setProperty("rate", 130)
-                    voices = engine.getProperty("voices")
-                    engine.setProperty("voice", voices[0].id)
-                except:
-                    pass
 
     def destructor(self):
         print("Closing application...")
