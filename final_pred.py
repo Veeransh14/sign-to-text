@@ -10,7 +10,8 @@ import time
 import queue
 import threading
 import traceback
-import pyttsx3
+import subprocess
+import shutil
 from keras.models import load_model
 from cvzone.HandTrackingModule import HandDetector
 from string import ascii_uppercase
@@ -784,20 +785,34 @@ class Application:
         self._tts_queue.put(text)
 
     def _tts_worker(self):
-        """Dedicated TTS thread — re-initializes engine per utterance for reliability."""
+        """Dedicated TTS thread — uses espeak-ng subprocess for thread-safe audio."""
+        # Detect available TTS backend once at startup
+        espeak = shutil.which("espeak-ng") or shutil.which("espeak")
+
         while True:
             text = self._tts_queue.get()
             if text is None:
                 break
             try:
-                engine = pyttsx3.init()
-                engine.setProperty("rate", 130)
-                voices = engine.getProperty("voices")
-                if voices:
-                    engine.setProperty("voice", voices[0].id)
-                engine.say(text)
-                engine.runAndWait()
-                engine.stop()
+                if espeak:
+                    subprocess.run(
+                        [espeak, "-s", "130", "--", text],
+                        timeout=30,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    # Fallback: pyttsx3 (requires it to be installed)
+                    import pyttsx3
+                    engine = pyttsx3.init()
+                    engine.setProperty("rate", 130)
+                    voices = engine.getProperty("voices")
+                    if voices:
+                        engine.setProperty("voice", voices[0].id)
+                    engine.say(text)
+                    engine.runAndWait()
+                    engine.stop()
+            except subprocess.TimeoutExpired:
+                print("TTS timeout — skipping utterance")
             except Exception as e:
                 print(f"TTS error: {e}")
 
