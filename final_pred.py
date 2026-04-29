@@ -12,6 +12,7 @@ import threading
 import traceback
 import subprocess
 import shutil
+import platform
 from keras.models import load_model
 from cvzone.HandTrackingModule import HandDetector
 from string import ascii_uppercase
@@ -408,8 +409,13 @@ class Application:
 
     def speak_fun(self):
         text = self.str.strip()
-        if text:
-            self._tts_say(text, drain=True)
+        print(f"[Speak] button clicked — text: {text!r}")
+        if not text:
+            self.status_label.config(text="Nothing to speak yet", fg="#cc0000")
+            return
+        self.speak.config(state="disabled", text="Speaking…")
+        self.root.after(2000, lambda: self.speak.config(state="normal", text="Speak"))
+        self._tts_say(text, drain=True)
 
     def clear_fun(self):
         self.str = " "
@@ -772,49 +778,70 @@ class Application:
             self._tts_say(words[-1], drain=True)
 
     def _tts_say(self, text, drain=False):
-        """Queue text to be spoken by the dedicated TTS worker thread.
-
-        drain=True discards any pending items so only this text is spoken next.
-        """
+        """Queue text to be spoken; restarts worker thread if it has died."""
         if drain:
             while not self._tts_queue.empty():
                 try:
                     self._tts_queue.get_nowait()
                 except queue.Empty:
                     break
+        if not self._tts_thread.is_alive():
+            print("[TTS] worker thread was dead — restarting")
+            self._tts_thread = threading.Thread(target=self._tts_worker, daemon=True)
+            self._tts_thread.start()
         self._tts_queue.put(text)
 
     def _tts_worker(self):
-        """Dedicated TTS thread — uses espeak-ng subprocess for thread-safe audio."""
-        # Detect available TTS backend once at startup
+        """Dedicated TTS thread — cross-platform subprocess TTS with pyttsx3 fallback."""
+        system = platform.system()
         espeak = shutil.which("espeak-ng") or shutil.which("espeak")
+        print(f"[TTS] worker started — OS={system}, espeak={espeak}")
 
         while True:
-            text = self._tts_queue.get()
+            try:
+                text = self._tts_queue.get(timeout=1)
+            except queue.Empty:
+                continue
             if text is None:
                 break
+            print(f"[TTS] speaking: {text!r}")
             try:
-                if espeak:
-                    subprocess.run(
-                        [espeak, "-s", "130", "--", text],
-                        timeout=30,
-                        stderr=subprocess.DEVNULL,
+                if system == "Darwin":
+                    subprocess.run(["say", "-r", "160", text],
+                                   timeout=30, stderr=subprocess.DEVNULL)
+                elif system == "Windows":
+                    ps_cmd = (
+                        "Add-Type -AssemblyName System.Speech; "
+                        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                        "$s.Rate = 2; "
+                        f'$s.Speak("{text}")'
                     )
+                    subprocess.run(["powershell", "-Command", ps_cmd],
+                                   timeout=30, stderr=subprocess.DEVNULL)
                 else:
-                    # Fallback: pyttsx3 (requires it to be installed)
-                    import pyttsx3
-                    engine = pyttsx3.init()
-                    engine.setProperty("rate", 130)
-                    voices = engine.getProperty("voices")
-                    if voices:
-                        engine.setProperty("voice", voices[0].id)
-                    engine.say(text)
-                    engine.runAndWait()
-                    engine.stop()
+                    if espeak:
+                        result = subprocess.run(
+                            [espeak, "-s", "130", "--", text],
+                            timeout=30,
+                            stderr=subprocess.PIPE,
+                        )
+                        if result.returncode != 0:
+                            print(f"[TTS] espeak returned {result.returncode}")
+                    else:
+                        import pyttsx3
+                        engine = pyttsx3.init()
+                        engine.setProperty("rate", 130)
+                        voices = engine.getProperty("voices")
+                        if voices:
+                            engine.setProperty("voice", voices[0].id)
+                        engine.say(text)
+                        engine.runAndWait()
+                        engine.stop()
+                print(f"[TTS] done: {text!r}")
             except subprocess.TimeoutExpired:
-                print("TTS timeout — skipping utterance")
+                print(f"[TTS] timeout speaking {text!r}")
             except Exception as e:
-                print(f"TTS error: {e}")
+                print(f"[TTS] error: {e}")
 
     def destructor(self):
         print("Closing application...")
